@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <cstdint>
 #include <charb.hpp>
 #include <misc.hpp>
 

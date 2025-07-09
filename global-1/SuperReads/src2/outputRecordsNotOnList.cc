@@ -23,6 +23,7 @@
 #include <vector>
 #include <string>
 #include <set>
+#include <cstdint>
 #include <charb.hpp>
 #include <misc.hpp>
 using namespace std;

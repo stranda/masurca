@@ -22,6 +22,7 @@
 #include <fstream>
 #include <string>
 #include <map>
+#include <cstdint>
 #include <exp_buffer.hpp>
 #include <charb.hpp>
 #include <jellyfish/err.hpp>

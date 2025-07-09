@@ -3,6 +3,7 @@
 #include <cstring>
 #include <vector>
 #include <string>
+#include <cstdint>
 #include <charb.hpp>
 #include <misc.hpp>
 void reverse_complement (charb &inSeq, charb &outSeq);

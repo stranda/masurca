@@ -43,6 +43,7 @@
 #include <vector>
 #include <list>
 #include <stack>
+#include <cstdint>
 #include <iterator>
 
 #include <jellyfish/err.hpp>

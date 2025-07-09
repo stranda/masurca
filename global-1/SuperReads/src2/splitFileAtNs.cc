@@ -14,6 +14,7 @@
 #include <cstring>
 #include <cctype>
 #include <vector>
+#include <cstdint>
 #include <misc.hpp>
 #include <charb.hpp>
 
