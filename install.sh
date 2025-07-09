@@ -21,4 +21,4 @@ export PKG_CONFIG_PATH=$LIBDIR/pkgconfig:$PKG_CONFIG_PATH
 echo "creating example config file masurca_config_example.txt"
 $BINDIR/masurca -g masurca_config_example.txt
 
-(cd Flye && make && cp -a ../Flye $DEST);
+(cd Flye && make && cp -a -n ../Flye $DEST);
