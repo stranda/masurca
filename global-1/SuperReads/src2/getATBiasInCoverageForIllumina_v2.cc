@@ -11,6 +11,7 @@
 #include <vector>
 #include <map>
 #include <utility>
+#include <cstdint>
 #include <charb.hpp>
 #include <misc.hpp>
 #include <exp_vector.hpp>

@@ -5,6 +5,7 @@ Copyright University of Maryland 2015
 #define __48BIT_ITERATOR_H__
 
 #include "const_iterator_traits.hpp"
+#include <cstdint>
 
 // Define the iterator and its const version
 template<typename IDX>

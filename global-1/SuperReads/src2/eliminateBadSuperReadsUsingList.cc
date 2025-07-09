@@ -27,6 +27,7 @@
 #include <string>
 #include <set>
 #include <vector>
+#include <cstdint>
 #include <charb.hpp>
 #include <map>
 #include <iostream>
