@@ -14,6 +14,7 @@
 #include <set>
 #include <map>
 #include <algorithm>
+#include <cstdint>
 #include <charb.hpp>
 #include <misc.hpp>
 

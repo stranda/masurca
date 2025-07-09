@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <string>
 #include <sys/stat.h>
+#include <cstdint>
 
 #include <vector>
 #include <iostream>

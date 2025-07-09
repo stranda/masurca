@@ -9,6 +9,7 @@ Copyright University of Maryland 2015
 #include <vector>
 #include <set>
 #include <algorithm>
+#include <cstdint>
 #include <charb.hpp>
 #include <misc.hpp>
 #include <src_mega_reads/findGapsInCoverageOfPacbios_cmdline.hpp>

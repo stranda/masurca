@@ -5,6 +5,7 @@
 #include <string>
 #include <set>
 #include <algorithm>
+#include <cstdint>
 #include <misc.hpp>
 #include <exp_buffer.hpp>
 #include <charb.hpp>

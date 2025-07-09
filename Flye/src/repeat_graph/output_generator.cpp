@@ -2,6 +2,7 @@
 //This file is a part of ABruijn program.
 //Released under the BSD license (see LICENSE file)
 
+#include <cstdint>
 #include "output_generator.h"
 #include "../sequence/consensus_generator.h"
 #include <iomanip>

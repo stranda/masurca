@@ -2,6 +2,7 @@
 //This file is a part of ABruijn program.
 //Released under the BSD license (see LICENSE file)
 
+#include <cstdint>
 #include "contig_extender.h"
 #include "../repeat_graph/output_generator.h"
 #include <cmath>

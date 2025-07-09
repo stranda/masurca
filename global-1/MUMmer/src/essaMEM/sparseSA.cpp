@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iomanip>
 #include <stdexcept>
+#include <cstdint>
 
 #include <mummer/sparseSA.hpp>
 #include <mummer/sparseSA_imp.hpp>
