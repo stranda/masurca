@@ -2,6 +2,7 @@
 //This file is a part of ABruijn program.
 //Released under the BSD license (see LICENSE file)
 
+#include <cstdint>
 #include "multiplicity_inferer.h"
 #include "graph_processing.h"
 #include "../common/disjoint_set.h"
