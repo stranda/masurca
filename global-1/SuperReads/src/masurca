@@ -1,0 +1,613 @@
+#!/usr/bin/env perl
+# SuperRead pipeline
+# Copyright (C) 2012  Genome group at University of Maryland.
+# 
+# This program is free software: you can redistribute it and/or
+# modify it under the terms of the GNU General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+# This script reads the the config file and runs the full super reads
+# pipeline.  An example of configuration file is in MasurcaConf.pm
+
+use strict;
+use warnings;
+use Env qw(@PATH @LD_LIBRARY_PATH);
+use File::Spec;
+use Getopt::Long;
+
+use FindBin qw($RealBin);
+use lib $RealBin;
+
+use MasurcaConf qw(fail $config_file);
+use MasurcaCommon qw($rerun_pe $rerun_sj $list_frg_files);
+use MasurcaSuperReads;
+use MasurcaCelera;
+use MasurcaSoap;
+use MasurcaPaths;
+
+#global variables
+my (@pe_files, @sj_files);
+my ($list_pe_files, $list_jump_files);
+
+# Those seem to be constants
+my $WINDOW                  = 10;
+my $MAX_ERR_PER_WINDOW      = 3;
+
+# Options to masurca script
+my $assembly_script = "assemble.sh";
+my $generate_default;
+my $skip_checking;
+my @prep_path;
+my @prep_ld;
+my $help;
+my $version_str="version 4.1.4";
+my $version;
+my $threads= 16;
+my $longreads;
+my $illumina;
+
+my $usage = "USAGE: $0 <config_file>\nUse -h or --help for options";
+my $help_str = <<"EOS" ;
+Create the assembly script from a MaSuRCA configuration file. A
+sample configuration file can be generated with the -g switch. The
+assembly script assemble.sh will run the assembly proper. For a 
+quick run without creating a configuration file, and with two Illumina 
+paired end reads files (forward/reverse) and (optionally) a 
+long reads (Nanopore/PacBio) file use -i switch, setting the number of threads with -t:
+
+masurca -i paired_ends_fwd.fastq.gz -t 32
+or
+masurca -i paired_ends_fwd.fastq.gz,paired_ends_rev.fastq.gz -t 32
+
+,and for a hybrid assembly you can also add the long Nanopore or PacBio reads with -r switch:
+
+masurca -i paired_ends_fwd.fastq.gz,paired_ends_rev.fastq.gz -r nanopore.fa.gz -t 32
+
+this will run paired-ends Illumina or hybrid assembly with CABOG contigger and default settings.  
+This is suitable for small assembly projects.
+
+Options:
+ -t, --threads             ONLY to use with -i option, number of threads
+ -i, --illumina            Run assembly without creating configuration file, argument can be 
+                              illumina_paired_end_forward_reads 
+                                or 
+                              illumina_paired_end_forward_reads,illumina_paired_end_reverse_reads
+                           Illumina read file names must be comma-separated, without a space in the middle.
+                           Illumina read files must be fastq, with valid quality values, can be gzipped.
+ -r, --reads               ONLY to use with -i option, single long reads file for hybrid assembly, can be Nanopore or PacBio, 
+                           fasta or fastq, can be gzipped
+
+ -v, --version             Report version
+ -o, --output              Assembly script ($assembly_script)
+ -g, --generate            Generate example configuration file
+ -p, --path                Prepend to PATH in assembly script
+ -l, --ld-library-path     Prepend to LD_LIBRARY_PATH in assembly script
+     --skip-checking       Skip checking availability of other executables
+ -h, --help                This message
+EOS
+
+GetOptions("o|output=s"          => \$assembly_script,
+           "t|threads=s"         => \$threads,
+           "i|illumina=s"        => \$illumina,
+           "r|reads=s"           => \$longreads,
+           "g|generate"          => \$generate_default,
+           "v|version"           => \$version,
+           "p|path=s"            => \@prep_path,
+           "l|ld-library-path=s" => \@prep_ld,
+           "skip-checking"       => \$skip_checking,
+           "h|help"              => \$help) or fail $usage;
+
+if($illumina) {
+  my @data=split(/,|\s+/,$illumina);
+  if($#data>=0) {
+    open(FILE, ">", "config.txt");
+    print FILE "# quick run configuration file\nDATA\n";
+    if($#data==0){
+      print FILE "PE = pe 500 50 $data[0]\n";
+    }elsif($#data==1){
+      print FILE "PE = pe 500 50 $data[0] $data[1]\n";
+    }else{
+      die("invalid argument $illumina for -i option, must be illumina_paired_end_forward_file or illumina_paired_end_forward_file,illumina_paired_end_referse_file");
+    }
+    if($longreads){
+      print FILE "NANOPORE = $longreads\n";
+    }
+    print FILE "END\n";
+    print FILE "PARAMETERS\nEXTEND_JUMP_READS=0\nGRAPH_KMER_SIZE = auto\n";
+    if($#data==1 && not($longreads)){
+      print FILE "USE_LINKING_MATES = 1\n";
+    }else{
+      print FILE "USE_LINKING_MATES = 0\n";
+    }
+    print FILE "USE_GRID=0\nGRID_ENGINE=SGE\nGRID_QUEUE=all.q\nGRID_BATCH_SIZE=500000000\nLHE_COVERAGE=25\nLIMIT_JUMP_COVERAGE = 300\nCA_PARAMETERS =  cgwErrorRate=0.15\nCLOSE_GAPS=1\n";
+    if(int($threads)>0){
+      print FILE "NUM_THREADS = ",int($threads),"\n";
+    }else{
+      print FILE "NUM_THREADS = 16\n";
+    }
+    print FILE "JF_SIZE = 200000000\nSOAP_ASSEMBLY=0\nFLYE_ASSEMBLY=0\nEND\n";
+    close(FILE);
+    open(FILE, ">", "run.sh");
+    print FILE "#!/bin/bash\n";
+    print FILE "$RealBin/masurca config.txt\n";
+    print FILE "bash ./assemble.sh\n";
+    close(FILE);
+    system("chmod 0755 ./run.sh");
+    system("./run.sh");
+    exit(0);
+  }else{
+    die("no data specified for -r option");
+  }
+}
+
+if($help) {
+  print "$help_str";
+  exit(0);
+}
+if($version){
+  print "$version_str\n";
+  exit(0);
+}
+fail $usage if @ARGV != 1;
+$config_file = $ARGV[0];
+
+if($generate_default) {
+  if(-e $config_file){
+    print "Refusing to overwrite existing configuration file '$config_file'";
+  }else{
+    open(FILE, ">", $config_file);
+    print(FILE MasurcaConf::default_config);
+    close(FILE);
+  }
+  exit(0);
+}
+
+sub script_done {
+  close(FILE);
+  chmod 0755, $assembly_script;
+  print("done.\n",
+        "execute $assembly_script to run assembly\n");
+  exit(0);
+}
+
+sub check_exec {
+  for my $e (@_) {
+    system("$e --help >/dev/null 2>&1") == 0 or fail "$e not found or failed to run";
+    print "$e OK\n";
+  }
+}
+
+# Parse configuration file
+my %config = MasurcaConf::parse($config_file);
+fail("no read data files specified") if(@{$config{PE_INFO}} + @{$config{JUMP_INFO}} + @{$config{OTHER_INFO}} == 0);
+
+if(@prep_path) {
+  unshift(@PATH, @prep_path);
+} else {
+  unshift(@PATH, $RealBin . "/../CA8/Linux-amd64/bin",$RealBin);
+}
+unshift(@LD_LIBRARY_PATH, @prep_ld) if @prep_ld;
+
+unless($skip_checking) {
+  print "Verifying PATHS...\n";
+  my @progs=("jellyfish", "runCA", "createSuperReadsForDirectory.perl");
+  push(@progs,("nucmer","mega_reads_assemble_cluster2.sh")) if(@{$config{PACBIO_INFO}});
+  push(@progs, "SOAPdenovo-63mer") if($config{SOAP_ASSEMBLY});
+  &check_exec(@progs);
+}
+
+fail ("no PE data specified") if(@{$config{PE_INFO}} == 0);
+
+print("creating script file for the actions...");
+
+my $config_abs_path = File::Spec->rel2abs($config_file);
+my $cmd_abs_path = File::Spec->rel2abs(__FILE__);
+
+open(FILE,">", $assembly_script) or fail "Can't open output file '$assembly_script': $!";
+print FILE <<"EOS";
+#!/bin/bash
+
+# $assembly_script generated by masurca
+CONFIG_PATH="$config_abs_path"
+CMD_PATH="$cmd_abs_path"
+set -o pipefail
+
+# Test that we support <() redirection
+(eval "cat <(echo test) >/dev/null" 2>/dev/null) || {
+  echo >&2 "ERROR: The shell used is missing important features."
+  echo >&2 "       Run the assembly script directly as './\$0'"
+  exit 1
+}
+
+# Parse command line switches
+while getopts ":rc" o; do
+  case "\${o}" in
+    c)
+    echo "configuration file is '\$CONFIG_PATH'"
+    exit 0
+    ;;
+    r)
+    echo "Rerunning configuration"
+    exec perl "\$CMD_PATH" "\$CONFIG_PATH"
+    echo "Failed to rerun configuration"
+    exit 1
+    ;;
+    *)
+    echo "Usage: \$0 [-r] [-c]"
+    exit 1
+    ;;
+  esac
+done
+EOS
+
+print FILE <<'EOS';
+set +e
+# Set some paths and prime system to save environment variables
+save () {
+  (echo -n "$1=\""; eval "echo -n \"\$$1\""; echo '"') >> environment.sh
+}
+GC=
+RC=
+NC=
+if tty -s < /dev/fd/1 2> /dev/null; then
+  GC='\e[0;32m'
+  RC='\e[0;31m'
+  NC='\e[0m'
+fi
+log () {
+  d=$(date)
+  echo -e "${GC}[$d]${NC} $@"
+}
+fail () {
+  d=$(date)
+  echo -e "${RC}[$d]${NC} $@"
+  exit 1
+}
+signaled () {
+  fail Interrupted
+}
+trap signaled TERM QUIT INT
+rm -f environment.sh; touch environment.sh
+
+# To run tasks in parallel
+#run_bg () {
+#  semaphore -j $NUM_THREADS --id masurca_$$ -- "$@"
+#}
+#run_wait () {
+#  semaphore -j $NUM_THREADS --id masurca_$$ --wait
+#}
+EOS
+;
+
+if(@prep_path) {
+  print FILE "export PATH=\"", join(":", @prep_path), ":\$PATH\"\n";
+} else {
+  print FILE "export PATH=\"$RealBin/../CA8/Linux-amd64/bin:$RealBin:\$PATH\"\n";
+}
+print FILE "save PATH\n";
+
+if(@prep_ld) {
+  print FILE "export LD_LIBRARY_PATH=\"", join(":", @prep_ld), ":\$LD_LIBRARY_PATH\"\n";
+  print FILE "save LD_LIBRARY_PATH\n";
+}
+print FILE "export PERL5LIB=", $RealBin . "/" . MasurcaPaths::rel_ext_bin, "\${PERL5LIB:+:\$PERL5LIB}\n";
+print FILE "save PERL5LIB\n";
+print FILE "NUM_THREADS=$config{NUM_THREADS}\n";
+print FILE "save NUM_THREADS\n";
+
+#override use linking mates if we only generate super reads 
+$config{USE_LINKING_MATES}  = 0 if($config{STOP_AFTER_SR});
+my $tmplist         = join(" ", @{$config{OTHER_INFO}});
+$tmplist.=" moleculo_shr.frg " if(@{$config{MOLECULO_INFO}});
+$list_frg_files    .= " ".$tmplist." ";
+
+###renaming reads###
+
+@pe_files        = MasurcaCommon::rename_reads(*FILE, "pe", @{$config{PE_INFO}});
+@sj_files        = MasurcaCommon::rename_reads(*FILE, "sj", @{$config{JUMP_INFO}}) if(@{$config{JUMP_INFO}});
+$list_pe_files   = join(" ", @pe_files);
+$list_jump_files = join(" ", @sj_files);
+
+###done renaming reads###
+print FILE "\n";
+
+###compute minimum and average PE read length and gc content, and kmer size###
+print FILE "head -q -n 40000  $list_pe_files | grep --text -v '^\+' | grep --text -v '^\@' > pe_data.tmp\n";
+print FILE "export PE_AVG_READ_LENGTH=`awk '{if(length(\$1)>31){n+=length(\$1);m++;}}END{print int(n/m)}' pe_data.tmp && rm -f pe_data.tmp`\n";
+print FILE "save PE_AVG_READ_LENGTH\n";
+print FILE "log Average PE read length \$PE_AVG_READ_LENGTH\n";
+
+if(uc($config{KMER}) eq "AUTO"){
+#here we have to estimate gc content and recompute kmer length for the graph
+  if(@{$config{POLISH_INFO}}){
+    print FILE "KMER=87\n";
+  }else{
+    MasurcaCommon::estimate_optimal_kmer(*FILE, $list_pe_files,"KMER");
+  }
+  print FILE "save KMER\n";
+  print FILE "log Using kmer size of \$KMER for the graph\n";
+}else{
+     print FILE "KMER=$config{KMER}\n";
+}
+
+if(@{$config{JUMP_INFO}} > 0){    
+    MasurcaCommon::estimate_optimal_kmer(*FILE, $list_jump_files,"KMER_J");
+    print FILE "save KMER_J\n";
+}else{
+   print FILE "KMER_J=\$KMER\n";
+}
+###done###
+
+###Jellyfish###
+
+MasurcaCommon::get_MIN_Q_CHAR(*FILE, $list_pe_files);
+
+print FILE "JF_SIZE=`ls -l *.fastq | awk '{n+=\$5}END{s=int(n/50); if(s>$config{JF_SIZE})printf \"\%.0f\",s;else print \"$config{JF_SIZE}\";}'`\n";
+print FILE "save JF_SIZE\n";
+print FILE "perl -e '{if(int('\$JF_SIZE')>$config{JF_SIZE}){print \"WARNING: JF_SIZE set too low, increasing JF_SIZE to at least '\$JF_SIZE', this automatic increase may be not enough!\\n\"}}'\n"; 
+if(not(-e "quorum_mer_db.jf") || $rerun_pe==1){
+    print FILE "log Creating mer database for Quorum\n";
+    MasurcaCommon::count_kmers_for_quorum(*FILE, $list_pe_files, $config{NUM_THREADS}, 5);
+    $rerun_pe=1;
+    $rerun_sj=1;
+}
+
+###done Jellyfish###
+print FILE "\n";
+###error correct PE###
+
+my $homo_polymer_flag = $config{DO_HOMOPOLYMER_TRIM} ? "--homo-trim $config{TRIM_PARAM}" : "";
+my $mmap_flag = $config{NO_MMAP} ? "-M" : "";
+
+if(not(-e "pe.cor.fa")||$rerun_pe==1){
+  print FILE <<"EOS";
+log Error correct PE
+
+quorum_error_correct_reads  -q \$((\$MIN_Q_CHAR + $config{RELIABLE_Q_PARAM})) --contaminant=$RealBin/../share/adapter.jf -m $config{KMER_COUNT_THRESHOLD} -s 1 -g 1 -a $config{KMER_RELIABLE_THRESHOLD} -t $config{NUM_THREADS} -w $WINDOW -e $MAX_ERR_PER_WINDOW $mmap_flag $homo_polymer_flag quorum_mer_db.jf $list_pe_files --no-discard -o pe.cor.tmp --verbose 1>quorum.err 2>&1 && mv pe.cor.tmp.fa pe.cor.fa || fail Error correction of PE reads failed. Check pe.cor.log.
+EOS
+    $rerun_pe=1;
+}
+
+###done error correct PE###
+print FILE "\n";
+###error correct JUMP###
+
+if(@{$config{JUMP_INFO}} > 0){
+    if(not(-e "sj.cor.fa")||$rerun_sj==1){
+      print FILE <<"EOS";
+log Error correct JUMP
+
+quorum_error_correct_reads -q \$((\$MIN_Q_CHAR + $config{RELIABLE_Q_PARAM})) --contaminant=$RealBin/../share/adapter.jf -m $config{KMER_COUNT_THRESHOLD} -s 1 -g 2 -a $config{KMER_RELIABLE_THRESHOLD} -t $config{NUM_THREADS} -w $WINDOW -e $MAX_ERR_PER_WINDOW $mmap_flag $homo_polymer_flag quorum_mer_db.jf $list_jump_files --no-discard -o sj.cor.tmp --verbose 1>quorum.err 2>&1 && mv sj.cor.tmp.fa sj.cor.fa || fail Error correction of JUMP reads failed. Check sj.cor.log.
+EOS
+      $rerun_sj=1;
+    }
+}
+
+###done error correct JUMP###
+print FILE "\n";
+###estimate genome size###
+my $k_u_arg="pe.cor.fa";
+$k_u_arg.=" sj.cor.fa" if(@{$config{JUMP_INFO}});
+
+print FILE "if [ -s ESTIMATED_GENOME_SIZE.txt ];then\n";
+print FILE "ESTIMATED_GENOME_SIZE=`head -n 1 ESTIMATED_GENOME_SIZE.txt`\n";
+print FILE "else\n";
+print FILE "log Estimating genome size\n";
+if(not(-e "k_u_hash_0")||$rerun_pe==1||$rerun_sj==1){
+    print FILE "jellyfish count -m 31 -t $config{NUM_THREADS} -C -s \$JF_SIZE -o k_u_hash_0 $k_u_arg\n";
+}
+print FILE "export ESTIMATED_GENOME_SIZE=`jellyfish histo -t $config{NUM_THREADS} -h 1 k_u_hash_0 | tail -n 1 |awk '{print \$2}'`\n";
+if($config{CA_PARAMETERS}=~ "cgwErrorRate=0.25" || $config{LIMIT_JUMP_COVERAGE} == 60) {print FILE "if [ \$ESTIMATED_GENOME_SIZE -ge 15000000 ]; then echo \"WARNING! CA_PARAMETERS = cgwErrorRate=0.25 and LIMIT_JUMP_COVERAGE = 60 in config file should only be used for bacterial genomes; set cgwErrorRate=0.15 and  LIMIT_JUMP_COVERAGE=300 for eukaryotes and plants!\";fi\n";}
+print FILE "echo \$ESTIMATED_GENOME_SIZE > ESTIMATED_GENOME_SIZE.txt\n";
+print FILE "fi\n";
+print FILE "save ESTIMATED_GENOME_SIZE\n";
+print FILE "log \"Estimated genome size: \$ESTIMATED_GENOME_SIZE\"\n";
+
+####done estimate genome size###
+print FILE "\n";
+###build k-unitigs###
+
+if(not(-s "guillaumeKUnitigsAtLeast32bases_all.fasta")||$rerun_pe==1||$rerun_sj==1){
+    print FILE "log Creating k-unitigs with k=\$KMER\n";
+    print FILE "create_k_unitigs_large_k -c \$((\$KMER-1)) -t $config{NUM_THREADS} -m \$KMER -n \$((\$ESTIMATED_GENOME_SIZE*2)) -l \$KMER -f `perl -e 'print 1/'\$KMER'/1e5'` $k_u_arg  | grep --text -v '^>' | perl -ane '{\$seq=\$F[0]; \$F[0]=~tr/ACTGactg/TGACtgac/;\$revseq=reverse(\$F[0]); \$h{(\$seq ge \$revseq)?\$seq:\$revseq}=1;}END{\$n=0;foreach \$k(keys \%h){print \">\",\$n++,\" length:\",length(\$k),\"\\n\$k\\n\"}}' > guillaumeKUnitigsAtLeast32bases_all.fasta.tmp && mv guillaumeKUnitigsAtLeast32bases_all.fasta.tmp guillaumeKUnitigsAtLeast32bases_all.fasta\n";
+    print FILE "if [[ \$KMER -eq \$KMER_J ]];then\n";
+    print FILE "ln -s guillaumeKUnitigsAtLeast32bases_all.fasta guillaumeKUnitigsAtLeast32bases_all.jump.fasta\n";
+    print FILE "else\n";
+    print FILE "log Creating k-unitigs with k=\$KMER_J\n";
+    print FILE "create_k_unitigs_large_k -c \$((\$KMER_J-1)) -t $config{NUM_THREADS} -m \$KMER_J -n \$((\$ESTIMATED_GENOME_SIZE*2)) -l \$KMER_J -f `perl -e 'print 1/'\$KMER_J'/1e5'` $k_u_arg  | grep --text -v '^>' | perl -ane '{\$seq=\$F[0]; \$F[0]=~tr/ACTGactg/TGACtgac/;\$revseq=reverse(\$F[0]); \$h{(\$seq ge \$revseq)?\$seq:\$revseq}=1;}END{\$n=0;foreach \$k(keys \%h){print \">\",\$n++,\" length:\",length(\$k),\"\\n\$k\\n\"}}' > guillaumeKUnitigsAtLeast32bases_all.jump.fasta.tmp && mv guillaumeKUnitigsAtLeast32bases_all.jump.fasta.tmp guillaumeKUnitigsAtLeast32bases_all.jump.fasta \n";
+    print FILE "fi\n";
+    $rerun_pe=1;
+    $rerun_sj=1;
+}
+
+###done build k-unitigs###
+print FILE "\n";
+###super reads and filtering for jump###
+if(@{$config{JUMP_INFO}} > 0) {
+  my $all_present=1;
+  foreach my $v (@{$config{JUMP_INFO}}) {
+    my @f = @$v;
+    $all_present=0 if( not( -e "$f[0].cor.clean.frg" ));
+  }
+  if($all_present==1){
+    foreach my $v (@{$config{JUMP_INFO}}) {
+      my @f = @$v;
+      $list_frg_files .= "$f[0].cor.clean.frg ";
+    }
+  }else{
+    print FILE "log 'Filtering mate pairs'\n";
+    MasurcaSuperReads::filter_jump(*FILE, %config);
+  }
+}
+
+###done with super reads and filtering for jump###
+print FILE "\n";
+##super reads for PE###
+
+print FILE "log 'Computing super reads from PE '\n";
+
+#create super reads from PE    
+if($rerun_pe==1|| not(-e "work1")) {
+  print FILE "rm -rf work1\n";
+  $rerun_pe=1;
+}
+
+print FILE "CA_DIR=\"CA\";\n";
+
+if(@{$config{POLISH_INFO}}){
+  print FILE "$RealBin/createSuperReadsForDirectory.perl  -doSimpleMerge -l \$KMER -mean-and-stdev-by-prefix-file meanAndStdevByPrefix.pe.txt -kunitigsfile guillaumeKUnitigsAtLeast32bases_all.fasta -t $config{NUM_THREADS} -mikedebug work1 pe.cor.fa 1> super1.err 2>&1\n" if(not(-e "work1/superReads.success"));
+  print FILE "$RealBin/mega_reads_assemble_polish.sh -t $config{NUM_THREADS} -k \$KMER -m work1 -A $config{POLISH_INFO}[0]\n";
+  script_done;
+}elsif(@{$config{REF_INFO}}){
+  print FILE "$RealBin/createSuperReadsForDirectory.perl -doSimpleMerge -l \$KMER -mean-and-stdev-by-prefix-file meanAndStdevByPrefix.pe.txt -kunitigsfile guillaumeKUnitigsAtLeast32bases_all.fasta -t $config{NUM_THREADS} -mikedebug work1 pe.cor.fa 1> super1.err 2>&1\n" if(not(-e "work1/superReads.success"));
+  MasurcaSuperReads::create_pe_linking_mates(*FILE, %config);
+  print FILE "$RealBin/mega_reads_assemble_ref.sh -t $config{NUM_THREADS} -e \$ESTIMATED_GENOME_SIZE -m work1 -r $config{REF_INFO}[0] -a $RealBin/../CA8/Linux-amd64/bin -o \"$list_frg_files $config{CA_PARAMETERS}\"\n";
+  script_done;
+}elsif(@{$config{PACBIO_INFO}} && @{$config{NANOPORE_INFO}}){
+  print FILE "if you have a mix Pacbio and Nanopore reads, please concatenate them all into a single fasta file and supply as NANOPORE= type.\n";
+  script_done;
+}elsif(@{$config{NANOPORE_RNA_INFO}}){
+  my $parameters;
+  $parameters=" -B 10 -D 0.02 -r $config{NANOPORE_RNA_INFO}[0] ";
+  print FILE "$RealBin/createSuperReadsForDirectory.perl --onepass -doSimpleMerge -l \$KMER -mean-and-stdev-by-prefix-file meanAndStdevByPrefix.pe.txt -kunitigsfile guillaumeKUnitigsAtLeast32bases_all.fasta -t $config{NUM_THREADS} -mikedebug work1 pe.cor.fa 1> super1.err 2>&1\n" if(not(-e "work1/superReads.success"));
+  #never use grid for rna-seq correction
+  print FILE "$RealBin/mega_reads_assemble_cluster.sh -k \$KMER -1 -E $config{GRID_ENGINE}  -Pb $config{GRID_BATCH_SIZE} -q $config{GRID_QUEUE} -G 0 -C $config{LHE_COVERAGE} -t $config{NUM_THREADS} -e \$ESTIMATED_GENOME_SIZE -m work1 -a $RealBin/../CA8/Linux-amd64/bin $parameters\n";
+  script_done;
+}elsif(@{$config{PACBIO_INFO}} || @{$config{NANOPORE_INFO}}){
+  my $parameters;
+  if(@{$config{PACBIO_INFO}}){
+    $parameters=" -B 15 -M 17 -D 0.02 -p $config{PACBIO_INFO}[0] ";
+  }else{
+    $parameters=" -B 15 -M 17 -D 0.02 -n $config{NANOPORE_INFO}[0] ";
+  }
+  print FILE "$RealBin/createSuperReadsForDirectory.perl -doSimpleMerge -l \$KMER -mean-and-stdev-by-prefix-file meanAndStdevByPrefix.pe.txt -kunitigsfile guillaumeKUnitigsAtLeast32bases_all.fasta -t $config{NUM_THREADS} -mikedebug work1 pe.cor.fa 1> super1.err 2>&1\n" if(not(-e "work1/superReads.success"));
+  if($config{USE_LINKING_MATES} == 1) {
+    MasurcaSuperReads::create_pe_linking_mates(*FILE, %config);
+  }
+  if($config{FLYE_ASSEMBLY}){
+    print FILE "$RealBin/mega_reads_assemble_cluster2.sh  -k \$KMER -F -E $config{GRID_ENGINE} -Pb $config{GRID_BATCH_SIZE} -q $config{GRID_QUEUE} -G $config{USE_GRID} -C $config{LHE_COVERAGE} -t $config{NUM_THREADS} -e \$ESTIMATED_GENOME_SIZE -m work1 -a $RealBin/../Flye/bin -o \"$list_frg_files $config{CA_PARAMETERS}\" $parameters\n";
+    print FILE "FLYE_DIR=`cat FLYE_dir.txt`\n";
+    print FILE "if [ ! -s \$FLYE_DIR/assembly.scaffolds.fasta ];then\n";
+    print FILE "  fail \"Assembly with flye failed, see files under flye/\"\n";
+    print FILE "else\n";
+    print FILE "  log \"All done, final assembly is in \$FLYE_DIR/assembly.scaffolds.fasta\"\n";
+    print FILE "  log \"Final stats for \$FLYE_DIR/assembly.scaffolds.fasta\"\n";
+    print FILE "  ufasta n50 -a \$FLYE_DIR/assembly.scaffolds.fasta\n";
+    print FILE "fi\n";
+    script_done;
+  }else{
+    print FILE "$RealBin/mega_reads_assemble_cluster2.sh  -k \$KMER -E $config{GRID_ENGINE}  -Pb $config{GRID_BATCH_SIZE} -q $config{GRID_QUEUE} -G $config{USE_GRID} -C $config{LHE_COVERAGE} -t $config{NUM_THREADS} -e \$ESTIMATED_GENOME_SIZE -m work1 -a $RealBin/../CA8/Linux-amd64/bin -o \"$list_frg_files $config{CA_PARAMETERS}\" $parameters\n";
+  }
+  print FILE "CA_DIR=`cat CA_dir.txt`\n";
+}else{
+  print FILE "createSuperReadsForDirectory.perl -l \$KMER -mean-and-stdev-by-prefix-file meanAndStdevByPrefix.pe.txt -kunitigsfile guillaumeKUnitigsAtLeast32bases_all.fasta -t $config{NUM_THREADS} -mikedebug work1 pe.cor.fa 1> super1.err 2>&1\n" if(not(-e "work1/superReads.success"));;
+  print FILE "if [[ ! -e work1/superReads.success ]];then\n";
+  print FILE "fail Super reads failed, check super1.err and files in ./work1/\n";
+  print FILE "fi\n";
+
+  if($config{SOAP_ASSEMBLY}){
+    MasurcaSoap::SOAPconfig(%config);
+    MasurcaSoap::runSOAP(*FILE, [@pe_files, @sj_files], %config);
+    script_done;
+  }
+
+  if($config{USE_LINKING_MATES} == 1) {
+    MasurcaSuperReads::create_pe_linking_mates(*FILE, %config);
+  }
+#create frg file for super reads
+  if(not(-e "superReadSequences_shr.frg")||$rerun_pe==1){
+    print FILE "create_sr_frg.pl 65535 < work1/superReadSequences.fasta 2>/dev/null | fasta2frg.pl super >  superReadSequences_shr.frg.tmp && mv superReadSequences_shr.frg.tmp superReadSequences_shr.frg\n";
+  }
+###done with super reads for PE###
+  print FILE "\n";
+
+  if($config{STOP_AFTER_SR}) {
+    print FILE "log 'Super reads done'\n";
+    script_done
+  }
+
+  if(@{$config{MOLECULO_INFO}} && not(-e "moleculo_shr.frg")){
+    my $i=0;
+    foreach my $f(@{$config{MOLECULO_INFO}}){
+      print FILE "perl -e '\$n=0;while(\$line=<>){print \">moleculo$i.\$n\\n\";\$n++;\$line=<>;print \$line;\$line=<>;\$line=<>;}' $f  | create_sr_frg.pl 2047 2>/dev/null | fasta2frg_m.pl moleculo$i >>  moleculo_shr.frg\n";
+    }
+  }
+
+#force ploidy to 1 for Illumina-only assemblies
+  print FILE "echo 1 > PLOIDY.txt\n";
+
+###Celera Assembler###
+  if(not(-e "CA/9-terminator/genome.qc")|| $rerun_pe || $rerun_sj){
+    print FILE "\nlog 'Celera Assembler'\n";
+    if($rerun_sj==1||$rerun_pe==1){
+      print FILE "rm -rf CA\n";
+    }
+    MasurcaCelera::runCA($rerun_pe,  $rerun_sj,*FILE, $list_frg_files, $tmplist, %config);
+  }
+}
+#if we got here and assembly has not even started yet, it is possible that we exited normally from the mega-reads for grid execution
+print FILE "if [ ! -d \$CA_DIR ];then\n";
+print FILE "  fail \"mega-reads exited before assembly\"\n";
+print FILE "fi\n";
+
+#here we close gaps in scaffolds:  we use create_k_unitigs allowing to continue on count 1 sequence and then generate fake reads from the 
+#end sequences of contigs that are next to each other in scaffolds, and then use super reads software to close the gaps for k=17...31
+print FILE "TERMINATOR=\"9-terminator\"\n";
+if($config{CLOSE_GAPS}){
+
+  print FILE "if [ -s \$CA_DIR/9-terminator/genome.scf.fasta ];then\n";
+  print FILE "  NSCF=`grep --text '^>'  \$CA_DIR/9-terminator/genome.scf.fasta |wc -l`\n";
+  print FILE "  NCTG=`grep --text '^>'  \$CA_DIR/9-terminator/genome.ctg.fasta |wc -l`\n";
+  print FILE "  if [ \$NCTG -eq \$NSCF ];then\n";
+  print FILE "    log 'No gap closing possible'\n";
+  print FILE "  else\n";
+  print FILE "    TERMINATOR=\"10-gapclose\"\n";
+  print FILE "    if [ -s \$CA_DIR/10-gapclose/genome.scf.fasta ];then\n";
+  print FILE "      log 'Gap closing done'\n";
+  print FILE "    else\n";
+  print FILE "      log 'Gap closing'\n";
+  my $reads_argument= join(" ", map { "--reads-file '$_'" } (@pe_files, @sj_files));
+
+  print FILE "      closeGapsLocally.perl --max-reads-in-memory 1000000000 -s $config{JF_SIZE} --Celera-terminator-directory \$CA_DIR/9-terminator $reads_argument --output-directory \$CA_DIR/10-gapclose --min-kmer-len 17 --max-kmer-len \$((\$PE_AVG_READ_LENGTH-5)) --num-threads $config{NUM_THREADS} --contig-length-for-joining \$((\$PE_AVG_READ_LENGTH-1)) --contig-length-for-fishing 200 --reduce-read-set-kmer-size 21 1>gapClose.err 2>&1\n";
+  print FILE "      if [[ -s \"\$CA_DIR/10-gapclose/genome.ctg.fasta\" ]];then\n";
+  print FILE "        log 'Gap close success'\n";
+  print FILE "      else\n";
+  print FILE "        fail Gap close failed, you can still use pre-gap close files under \$CA_DIR/9-terminator/. Check gapClose.err for problems.\n";
+  print FILE "      fi\n";#if test completed
+  print FILE "    fi\n";#if done
+  print FILE "  fi\n";#if not possible 
+  print FILE "else\n";
+  print FILE "  fail \"Assembly stopped or failed, see \$CA_DIR.log\"\n";
+  print FILE "fi\n";#if scaffolding failed
+}
+
+#here we filter for redundant scaffolds
+print FILE "if [ -s \$CA_DIR/\$TERMINATOR/genome.scf.fasta ];then\n";
+print FILE "  if [ ! -e \$CA_DIR/filter_map.contigs.success ];then\n";
+print FILE "  log 'Removing redundant scaffolds'\n";
+print FILE "    PLOIDY=`cat PLOIDY.txt`\n";
+print FILE "    deduplicate_contigs.sh \$CA_DIR genome $config{NUM_THREADS} \$PLOIDY \$TERMINATOR \n";
+print FILE "  fi\n";
+print FILE "  log \"Assembly complete, primary scaffold sequences are in \$CA_DIR/primary.genome.scf.fasta\"\n";
+print FILE "  log \"redundant or haplotype variant scaffold sequences are in \$CA_DIR/alternative.genome.scf.fasta\"\n";
+print FILE "else\n";
+print FILE "  fail \"Assembly stopped or failed, see \$CA_DIR.log\"\n";
+print FILE "fi\n";
+
+###Done !!!! Hoorayyyy!!! :)###
+print FILE "log \"All done, final assembly is in \$CA_DIR/primary.genome.scf.fasta\"\n";
+print FILE "log \"Final stats for \$CA_DIR/primary.genome.scf.fasta\"\n";
+print FILE "ufasta n50 -a \$CA_DIR/primary.genome.scf.fasta\n";
+
+script_done
+
+
